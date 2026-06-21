@@ -50,6 +50,16 @@ function Write-BigResultsTitle {
   Write-Host "  ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚══════╝╚═╝   " -ForegroundColor Green
   Write-Host
 }
+
+function Write-ProgressBar {
+  param([int]$Percent, [string]$Status)
+  $width = 40
+  $filled = [math]::Floor(($Percent / 100) * $width)
+  $empty = $width - $filled
+  $bar = ('█' * $filled) + ('░' * $empty)
+  Write-Host ("`r[ {0} ] {1,3}%  {2}" -f $bar, $Percent, $Status) -ForegroundColor Green -NoNewline
+  if ($Percent -ge 100) { Write-Host }
+}
 # ======================================================
 
 # ==================== ALLE ORIGINELE FUNCTIES ====================
@@ -712,26 +722,26 @@ function Write-FindingTable {
   foreach ($finding in $ordered) {
     if (-not $lastSeverity) {
       if ($finding.Severity -eq 'HIGH') {
-        Write-Host ('=' * 86) -ForegroundColor Green
-        Write-Host 'HIGH' -ForegroundColor Red
-        Write-Host ('=' * 86) -ForegroundColor Green
+        Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Red
+        Write-Host "                                   HIGH                                        " -ForegroundColor Red
+        Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Red
       } elseif ($finding.Severity -eq 'MEDIUM') {
-        Write-Host ('=' * 86) -ForegroundColor Green
-        Write-Host 'MEDIUM' -ForegroundColor Yellow
-        Write-Host ('=' * 86) -ForegroundColor Green
+        Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Yellow
+        Write-Host "                                  MEDIUM                                       " -ForegroundColor Yellow
+        Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Yellow
       } else {
-        Write-Host ('-' * 86) -ForegroundColor DarkGray
-        Write-Host 'LOW' -ForegroundColor Gray
-        Write-Host ('-' * 86) -ForegroundColor DarkGray
+        Write-Host "--------------------------------------------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "                                    LOW                                        " -ForegroundColor Gray
+        Write-Host "--------------------------------------------------------------------------------" -ForegroundColor DarkGray
       }
     } elseif ($lastSeverity -eq 'HIGH' -and $finding.Severity -eq 'MEDIUM') {
-      Write-Host ('=' * 86) -ForegroundColor Green
-      Write-Host 'MEDIUM' -ForegroundColor Yellow
-      Write-Host ('=' * 86) -ForegroundColor Green
+      Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Yellow
+      Write-Host "                                  MEDIUM                                       " -ForegroundColor Yellow
+      Write-Host "████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Yellow
     } elseif ($lastSeverity -eq 'MEDIUM' -and $finding.Severity -eq 'LOW') {
-      Write-Host ('-' * 86) -ForegroundColor DarkGray
-      Write-Host 'LOW' -ForegroundColor Gray
-      Write-Host ('-' * 86) -ForegroundColor DarkGray
+      Write-Host "--------------------------------------------------------------------------------" -ForegroundColor DarkGray
+      Write-Host "                                    LOW                                        " -ForegroundColor Gray
+      Write-Host "--------------------------------------------------------------------------------" -ForegroundColor DarkGray
     }
     $lastSeverity = $finding.Severity
 
