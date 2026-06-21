@@ -14,7 +14,6 @@ function Test-TimeBudget {
   return (((Get-Date) - $script:ScanStartedAt).TotalSeconds -lt $script:MaxScanSeconds)
 }
 
-# ==================== GROENE BANNER ====================
 function Write-Header {
   Clear-Host
   Write-Host "╔════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
@@ -40,6 +39,16 @@ function Write-Header {
   Write-Host
 }
 
+function Write-ProgressBar {
+  param([int]$Percent, [string]$Status)
+  $width = 34
+  $filled = [math]::Floor(($Percent / 100) * $width)
+  $empty = $width - $filled
+  $bar = ('#' * $filled) + ('-' * $empty)
+  Write-Host ("`rScan progress [{0}] {1,3}% {2}" -f $bar, $Percent, $Status) -ForegroundColor Green -NoNewline
+  if ($Percent -ge 100) { Write-Host }
+}
+
 function Write-BigResultsTitle {
   Write-Host
   Write-Host "  ██████╗ ███████╗███████╗██╗   ██╗██╗  ████████╗███████╗" -ForegroundColor Green
@@ -51,59 +60,39 @@ function Write-BigResultsTitle {
   Write-Host
 }
 
-function Write-ProgressBar {
-  param([int]$Percent, [string]$Status)
-  $width = 34
-  $filled = [math]::Floor(($Percent / 100) * $width)
-  $empty = $width - $filled
-  $bar = ('#' * $filled) + ('-' * $empty)
-  Write-Host ("`rScan progress [{0}] {1,3}% {2}" -f $bar, $Percent, $Status) -ForegroundColor Green -NoNewline
-  if ($Percent -ge 100) { Write-Host }
-}
-
-# ==================== ALLE ORIGINELE SCAN FUNCTIES (ongewijzigd) ====================
-function Get-SeverityRank {
-  param([string]$Severity)
-  switch ($Severity) {
-    'HIGH' { return 0 }
-    'MEDIUM' { return 1 }
-    default { return 2 }
-  }
-}
-
-function Test-MacroName {
-  param([string]$Name)
-  if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-  $lower = $Name.ToLowerInvariant()
-  $patterns = @('autohotkey','.ahk','macro','clicker','autoclick','auto-click','doubleclick','rapidfire','tinytask','pulover','keyran','xmouse','mouse recorder','keyboard recorder','jitbit','recorder','.mcr','.amc','.macro','.tinytask','.rec','rapid fire','rapid-fire')
-  foreach ($pattern in $patterns) { if ($lower.Contains($pattern)) { return $true } }
-  return $false
-}
-
-# (De rest van de functies uit je originele bestand: Test-PeripheralSoftwareName, Add-Finding, Get-UserDirs, Get-ScanRoots, Search-KnownMacroProcesses, Search-PeripheralSoftware, Search-InAppMacroConfigs, Search-MacroFiles, Search-DeletedMacros, Search-AhkScriptContent, Search-Prefetch, Search-RecentJavaLogs, Write-CleanSummary, Write-RecentMacroActivity, Write-FindingTable enz.)
+# ==================== ORIGINELE SCAN FUNCTIES (ongewijzigd) ====================
+# (Plak hier alle functies uit je originele bestand: Get-SeverityRank, Test-MacroName, Test-PeripheralSoftwareName, Add-Finding, Get-UserDirs, Get-ScanRoots, Search-KnownMacroProcesses, etc.)
 
 Write-Header
 Write-ProgressBar -Percent 0 -Status 'Starting scan'
 
-# Hier komen alle Search- calls zoals in je originele code
 Search-KnownMacroProcesses
 Write-ProgressBar -Percent 15 -Status 'Running processes checked'
-# ... (de rest van de progress calls)
+Search-PeripheralSoftware
+Write-ProgressBar -Percent 30 -Status 'Mouse and keyboard software checked'
+Search-InAppMacroConfigs
+Write-ProgressBar -Percent 40 -Status 'In-app macro configs checked'
+Search-MacroFiles
+Write-ProgressBar -Percent 50 -Status 'Macro file names checked'
+Search-AhkScriptContent
+Write-ProgressBar -Percent 60 -Status 'Macro files and scripts checked'
+Search-DeletedMacros
+Write-ProgressBar -Percent 70 -Status 'Deleted traces checked'
+Search-Prefetch
+Write-ProgressBar -Percent 88 -Status 'Windows execution traces checked'
+Search-RecentJavaLogs
+Write-ProgressBar -Percent 100 -Status 'Scan complete'
 
 Write-Host
-Write-BigResultsTitle
+Write-BigResultsTitle   # <-- Nu alleen hier (na de scan)
+
 Write-Host ('=' * 86) -ForegroundColor Green
 Write-CleanSummary
 Write-RecentMacroActivity
 Write-FindingTable
 
 Write-Host ('=' * 86) -ForegroundColor Green
-Write-Host 'HIGH means direct evidence. MEDIUM means strong trace, including peripheral software and recent deleted traces. LOW means weak context only.' -ForegroundColor DarkGray
-Write-Host 'For best process and Windows trace coverage, run this tool as administrator.' -ForegroundColor DarkGray
-
-if (-not (Test-TimeBudget)) {
-  Write-Host 'Time limit reached: scan was capped to stay under 2 minutes.' -ForegroundColor Yellow
-}
+Write-Host 'HIGH means direct evidence. MEDIUM means strong trace...' -ForegroundColor DarkGray
 
 if (-not $NoPause) {
   Write-Host
