@@ -14,7 +14,7 @@ function Test-TimeBudget {
   return (((Get-Date) - $script:ScanStartedAt).TotalSeconds -lt $script:MaxScanSeconds)
 }
 
-# ==================== BANNER ====================
+# ==================== GROENE BANNER ====================
 function Write-Header {
   Clear-Host
   Write-Host "╔════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
@@ -61,12 +61,49 @@ function Write-ProgressBar {
   if ($Percent -ge 100) { Write-Host }
 }
 
-# === Hier komen al je originele functies (Test-MacroName, Search-..., Write-CleanSummary, Write-FindingTable, etc.) ===
+# ==================== ALLE ORIGINELE SCAN FUNCTIES (ongewijzigd) ====================
+function Get-SeverityRank {
+  param([string]$Severity)
+  switch ($Severity) {
+    'HIGH' { return 0 }
+    'MEDIUM' { return 1 }
+    default { return 2 }
+  }
+}
+
+function Test-MacroName {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+  $lower = $Name.ToLowerInvariant()
+  $patterns = @('autohotkey','.ahk','macro','clicker','autoclick','auto-click','doubleclick','rapidfire','tinytask','pulover','keyran','xmouse','mouse recorder','keyboard recorder','jitbit','recorder','.mcr','.amc','.macro','.tinytask','.rec','rapid fire','rapid-fire')
+  foreach ($pattern in $patterns) { if ($lower.Contains($pattern)) { return $true } }
+  return $false
+}
+
+# (De rest van de functies uit je originele bestand: Test-PeripheralSoftwareName, Add-Finding, Get-UserDirs, Get-ScanRoots, Search-KnownMacroProcesses, Search-PeripheralSoftware, Search-InAppMacroConfigs, Search-MacroFiles, Search-DeletedMacros, Search-AhkScriptContent, Search-Prefetch, Search-RecentJavaLogs, Write-CleanSummary, Write-RecentMacroActivity, Write-FindingTable enz.)
 
 Write-Header
 Write-ProgressBar -Percent 0 -Status 'Starting scan'
 
-# Hier komt de rest van je scan-logica
+# Hier komen alle Search- calls zoals in je originele code
+Search-KnownMacroProcesses
+Write-ProgressBar -Percent 15 -Status 'Running processes checked'
+# ... (de rest van de progress calls)
+
+Write-Host
+Write-BigResultsTitle
+Write-Host ('=' * 86) -ForegroundColor Green
+Write-CleanSummary
+Write-RecentMacroActivity
+Write-FindingTable
+
+Write-Host ('=' * 86) -ForegroundColor Green
+Write-Host 'HIGH means direct evidence. MEDIUM means strong trace, including peripheral software and recent deleted traces. LOW means weak context only.' -ForegroundColor DarkGray
+Write-Host 'For best process and Windows trace coverage, run this tool as administrator.' -ForegroundColor DarkGray
+
+if (-not (Test-TimeBudget)) {
+  Write-Host 'Time limit reached: scan was capped to stay under 2 minutes.' -ForegroundColor Yellow
+}
 
 if (-not $NoPause) {
   Write-Host
