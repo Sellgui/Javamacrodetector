@@ -14,6 +14,7 @@ function Test-TimeBudget {
   return (((Get-Date) - $script:ScanStartedAt).TotalSeconds -lt $script:MaxScanSeconds)
 }
 
+# ==================== NIEUWE GROENE BANNERS ====================
 function Write-Header {
   Clear-Host
   Write-Host "╔════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
@@ -39,16 +40,6 @@ function Write-Header {
   Write-Host
 }
 
-function Write-ProgressBar {
-  param([int]$Percent, [string]$Status)
-  $width = 34
-  $filled = [math]::Floor(($Percent / 100) * $width)
-  $empty = $width - $filled
-  $bar = ('#' * $filled) + ('-' * $empty)
-  Write-Host ("`rScan progress [{0}] {1,3}% {2}" -f $bar, $Percent, $Status) -ForegroundColor Green -NoNewline
-  if ($Percent -ge 100) { Write-Host }
-}
-
 function Write-BigResultsTitle {
   Write-Host
   Write-Host "  ██████╗ ███████╗███████╗██╗   ██╗██╗  ████████╗███████╗" -ForegroundColor Green
@@ -59,32 +50,41 @@ function Write-BigResultsTitle {
   Write-Host "  ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚══════╝╚═╝   ╚══════╝" -ForegroundColor Green
   Write-Host
 }
+# ======================================================
 
-# ==================== ORIGINELE SCAN FUNCTIES (ongewijzigd) ====================
-# (Plak hier alle functies uit je originele bestand: Get-SeverityRank, Test-MacroName, Test-PeripheralSoftwareName, Add-Finding, Get-UserDirs, Get-ScanRoots, Search-KnownMacroProcesses, etc.)
+# ==================== ALLE ORIGINELE FUNCTIES (ongewijzigd) ====================
+# Plak hier ALLE functies uit je oude code (van Test-MacroName tot Write-FindingTable)
+# De rest blijft exact hetzelfde als in je originele bestand.
 
 Write-Header
 Write-ProgressBar -Percent 0 -Status 'Starting scan'
 
 Search-KnownMacroProcesses
 Write-ProgressBar -Percent 15 -Status 'Running processes checked'
+
 Search-PeripheralSoftware
 Write-ProgressBar -Percent 30 -Status 'Mouse and keyboard software checked'
+
 Search-InAppMacroConfigs
 Write-ProgressBar -Percent 40 -Status 'In-app macro configs checked'
+
 Search-MacroFiles
 Write-ProgressBar -Percent 50 -Status 'Macro file names checked'
+
 Search-AhkScriptContent
 Write-ProgressBar -Percent 60 -Status 'Macro files and scripts checked'
+
 Search-DeletedMacros
 Write-ProgressBar -Percent 70 -Status 'Deleted traces checked'
+
 Search-Prefetch
 Write-ProgressBar -Percent 88 -Status 'Windows execution traces checked'
+
 Search-RecentJavaLogs
 Write-ProgressBar -Percent 100 -Status 'Scan complete'
 
 Write-Host
-Write-BigResultsTitle   # <-- Nu alleen hier (na de scan)
+Write-BigResultsTitle          # ← Alleen hier (na de scan)
 
 Write-Host ('=' * 86) -ForegroundColor Green
 Write-CleanSummary
@@ -92,9 +92,20 @@ Write-RecentMacroActivity
 Write-FindingTable
 
 Write-Host ('=' * 86) -ForegroundColor Green
-Write-Host 'HIGH means direct evidence. MEDIUM means strong trace...' -ForegroundColor DarkGray
+Write-Host 'HIGH means direct evidence. MEDIUM means strong trace, including peripheral software and recent deleted traces. LOW means weak context only.' -ForegroundColor DarkGray
+Write-Host 'For best process and Windows trace coverage, run this tool as administrator.' -ForegroundColor DarkGray
+
+if (-not (Test-TimeBudget)) {
+  Write-Host 'Time limit reached: scan was capped to stay under 2 minutes.' -ForegroundColor Yellow
+}
 
 if (-not $NoPause) {
   Write-Host
   Read-Host 'Press Enter to exit' | Out-Null
 }
+
+$high = @($script:Findings | Where-Object Severity -eq 'HIGH').Count
+$medium = @($script:Findings | Where-Object Severity -eq 'MEDIUM').Count
+if ($high -gt 0) { exit 2 }
+if ($medium -gt 0) { exit 1 }
+exit 0
