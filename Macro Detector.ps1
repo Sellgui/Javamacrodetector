@@ -272,18 +272,487 @@ function Get-KnownPeripheralConfigTargets {
   return $targets
 }
 
-function Search-InAppMacroConfigs { ... }   # (volledige functie uit je origineel)
-function Get-LatestWriteTimeUnderPath { ... }
-function Search-KnownMacroProcesses { ... }
-function Search-PeripheralSoftware { ... }
-function Search-MacroFiles { ... }
-function Search-DeletedMacros { ... }
-function Search-AhkScriptContent { ... }
-function Search-Prefetch { ... }
-function Search-RecentJavaLogs { ... }
-function Write-CleanSummary { ... }
-function Write-RecentMacroActivity { ... }
-function Write-FindingTable { ... }
+function Search-InAppMacroConfigs {
+  $roots = New-Object System.Collections.Generic.List[string]
+  foreach ($target in Get-KnownPeripheralConfigTargets) {
+    foreach ($pattern in $target.Patterns) {
+      foreach ($item in Resolve-KnownPathPattern $pattern) {
+        if (-not $item) { continue }
+        if ($item.PSIsContainer) {
+          $roots.Add($item.FullName) | Out-Null
+        } else {
+          $roots.Add((Split-Path -Parent $item.FullName)) | Out-Null
+        }
+      }
+    }
+  }
+
+  $allowedExtensions = @('.json','.xml','.ini','.cfg','.conf','.txt','.db','.sqlite','.sqlite3','.dat','.settings','.cuecfg','.ldb','.log','.bin','.amc2','.ma32aiy')
+  $nameHints = @('macro','macros','macrodb','macrodata','profile','profiles','setting','settings','bind','binds','button','buttons','action','actions','assignment','assignments','sequence','record','config','cuecfg')
+  $macroKeywords = @('macro','macros','sequence','keystroke','keystrokes','keyDown','keyUp','mouseDown','mouseUp','delay','repeat','rapid','clicker','buttonAction','buttonAssignment','keyAssignment','RecMouseCLicksEnable','MemberFuncSlot','custom_macro_list','MacroData','record')
+
+  foreach ($root in $roots | Sort-Object -Unique) {
+    if (-not (Test-TimeBudget)) { break }
+    if (-not (Test-Path -LiteralPath $root)) { continue }
+    Get-ChildItem -LiteralPath $root -Recurse -Depth 5 -Force -File -ErrorAction SilentlyContinue |
+      Where-Object {
+        $file = $_
+        $fileName = $file.Name.ToLowerInvariant()
+        $hasNameHint = @($nameHints | Where-Object { $fileName.Contains($_) }).Count -gt 0
+        $_.Length -le 8MB -and
+        -not (Test-SkipInAppConfigPath $_.FullName) -and
+        ($allowedExtensions -contains $_.Extension.ToLowerInvariant() -or $hasNameHint)
+      } |
+      Select-Object -First 1200 |
+      ForEach-Object {
+        if (-not (Test-TimeBudget)) { return }
+        try {
+          $bytes = [IO.File]::ReadAllBytes($_.FullName)
+        } catch {
+          return
+        }
+        $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+        $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+        $text = ($ascii + "`n" + $unicode)
+        $hits = @()
+        foreach ($keyword in $macroKeywords) {
+          if ($text -match [regex]::Escape($keyword)) { $hits += $keyword }
+        }
+        $uniqueHits = @($hits | Select-Object -Unique)
+        if ($uniqueHits.Count -eq 0) { return }
+
+        $hasMacroWord = $uniqueHits -contains 'macro' -or $uniqueHits -contains 'macros'
+        $hasActionData = @($uniqueHits | Where-Object { $_ -in @('sequence','keystroke','keystrokes','keyDown','keyUp','mouseDown','mouseUp','delay','repeat','buttonAction','buttonAssignment','keyAssignment') }).Count -gt 0
+        $severity = if ($hasMacroWord -and $hasActionData -and $_.FullName -match '\\AppData\\') { 'HIGH' } else { 'MEDIUM' }
+        $vendor = Get-PeripheralVendor $_.FullName
+        Add-Finding -Severity $severity -Category 'In-app macro config evidence' -Evidence $vendor -Path $_.FullName -CreatedAt $_.CreationTime -ModifiedAt $_.LastWriteTime -Details ("Config keywords: " + ($uniqueHits -join ', '))
+      }
+  }
+}
+
+function Get-LatestWriteTimeUnderPath {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  $latest = $item.LastWriteTime
+  if ($item.PSIsContainer) {
+    $child = Get-ChildItem -LiteralPath $Path -Recurse -Depth 4 -Force -File -ErrorAction SilentlyContinue |
+      Where-Object { -not (Test-SkipScanPath $_.FullName) } |
+      Select-Object -First 350 |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1
+    if ($child -and $child.LastWriteTime -gt $latest) { $latest = $child.LastWriteTime }
+  }
+  return $latest
+}
+
+function Search-KnownMacroProcesses {
+  $processNames = @(
+    'AutoHotkey','AutoHotkeyU32','AutoHotkeyU64','AutoHotkey32','AutoHotkey64',
+    'Pulover','PuloversMacroCreator','MacroRecorder','JitbitMacroRecorder',
+    'TinyTask','MiniMouseMacro','MouseRecorder','KeyboardMouseRecorder',
+    'Keyran','Razer Synapse','RazerSynapse','Logitech G HUB','lghub',
+    'Corsair iCUE','iCUE','SteelSeriesGG','X-Mouse Button Control','XMouseButtonControl'
+  )
+
+  Get-CimInstance Win32_Process | ForEach-Object {
+    $name = $_.Name
+    $cmd = $_.CommandLine
+    $match = $false
+    foreach ($known in $processNames) {
+      if ($name -like "*$known*" -or $cmd -like "*$known*") { $match = $true; break }
+    }
+
+    if ($match -or $cmd -match '\.ahk(\s|$|")') {
+      $started = $null
+      if ($_.CreationDate) { $started = [Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate) }
+      Add-Finding -Severity 'HIGH' -Category 'Running macro process' -Evidence $name -Path ($_.ExecutablePath) -UsedAt $started -Details ($cmd -replace '\s+', ' ')
+    }
+  }
+}
+
+function Search-PeripheralSoftware {
+  $runningByVendor = @{}
+  Get-CimInstance Win32_Process | ForEach-Object {
+    $name = $_.Name
+    $cmd = $_.CommandLine
+    $path = $_.ExecutablePath
+    if (Test-PeripheralSoftwareName "$name $cmd $path") {
+      $started = $null
+      if ($_.CreationDate) { $started = [Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate) }
+      $vendor = Get-PeripheralVendor "$name $cmd $path"
+      if (-not $runningByVendor.ContainsKey($vendor)) {
+        $runningByVendor[$vendor] = [pscustomobject]@{
+          Vendor = $vendor
+          Started = $started
+          PrimaryPath = $path
+          Count = 0
+        }
+      }
+      $runningByVendor[$vendor].Count++
+      if ($started -and (-not $runningByVendor[$vendor].Started -or $started -gt $runningByVendor[$vendor].Started)) {
+        $runningByVendor[$vendor].Started = $started
+        $runningByVendor[$vendor].PrimaryPath = $path
+      }
+    }
+  }
+
+  foreach ($vendor in $runningByVendor.Keys) {
+    $entry = $runningByVendor[$vendor]
+    Add-Finding -Severity 'MEDIUM' -Category 'Peripheral software running' -Evidence $entry.Vendor -Path $entry.PrimaryPath -UsedAt $entry.Started -Details "Running processes: $($entry.Count). Mouse/keyboard software may support custom binds or macros."
+  }
+
+  $knownConfigsByVendor = @{}
+  foreach ($target in Get-KnownPeripheralConfigTargets) {
+    foreach ($pattern in $target.Patterns) {
+      foreach ($item in Resolve-KnownPathPattern $pattern) {
+        if (-not $item) { continue }
+        $latest = Get-LatestWriteTimeUnderPath $item.FullName
+        if (-not $knownConfigsByVendor.ContainsKey($target.Vendor)) {
+          $knownConfigsByVendor[$target.Vendor] = [pscustomobject]@{
+            Vendor = $target.Vendor
+            Latest = $latest
+            PrimaryPath = $item.FullName
+            Count = 0
+            ImportantFiles = New-Object System.Collections.Generic.List[string]
+          }
+        }
+        $knownConfigsByVendor[$target.Vendor].Count++
+        if (-not $item.PSIsContainer) { $knownConfigsByVendor[$target.Vendor].ImportantFiles.Add($item.Name) | Out-Null }
+        if ($latest -and (-not $knownConfigsByVendor[$target.Vendor].Latest -or $latest -gt $knownConfigsByVendor[$target.Vendor].Latest)) {
+          $knownConfigsByVendor[$target.Vendor].Latest = $latest
+          $knownConfigsByVendor[$target.Vendor].PrimaryPath = $item.FullName
+        }
+      }
+    }
+  }
+
+  foreach ($vendor in $knownConfigsByVendor.Keys) {
+    $entry = $knownConfigsByVendor[$vendor]
+    $files = @($entry.ImportantFiles | Select-Object -Unique)
+    $fileText = if ($files.Count -gt 0) { " Important files found: $($files -join ', ')." } else { '' }
+    Add-Finding -Severity 'MEDIUM' -Category 'Peripheral config locations' -Evidence $entry.Vendor -Path $entry.PrimaryPath -ModifiedAt $entry.Latest -Details "Known config matches: $($entry.Count). These locations can store custom binds, profiles, macros, or cloud/cache data.$fileText"
+  }
+
+  $registryVendors = @('Logitech','LGHUB','Razer','Corsair','SteelSeries','ROCCAT','ASUS','Glorious Core','HyperX','MSI','Redragon','Pulsar','LAMZU','AttackShark','Ajazz','Darmoshark','VGN','Keychron','VIA','Alienware','Cooler Master')
+  $registryByVendor = @{}
+  foreach ($hive in @('HKCU:\Software','HKLM:\SOFTWARE','HKLM:\SOFTWARE\WOW6432Node')) {
+    foreach ($vendor in $registryVendors) {
+      $key = Join-Path $hive $vendor
+      if (Test-Path -LiteralPath $key) {
+        $cleanVendor = Get-PeripheralVendor $vendor
+        if (-not $registryByVendor.ContainsKey($cleanVendor)) {
+          $registryByVendor[$cleanVendor] = [pscustomobject]@{
+            Vendor = $cleanVendor
+            PrimaryPath = $key
+            Count = 0
+          }
+        }
+        $registryByVendor[$cleanVendor].Count++
+      }
+    }
+  }
+
+  foreach ($vendor in $registryByVendor.Keys) {
+    $entry = $registryByVendor[$vendor]
+    Add-Finding -Severity 'LOW' -Category 'Peripheral registry keys' -Evidence $entry.Vendor -Path $entry.PrimaryPath -Details "Registry settings keys found: $($entry.Count). Modified time is not shown because standard PowerShell does not expose reliable registry last-write time."
+  }
+
+  $roots = New-Object System.Collections.Generic.List[string]
+  foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    if ($base -and (Test-Path -LiteralPath $base)) { $roots.Add($base) | Out-Null }
+  }
+  foreach ($user in Get-UserDirs) {
+    foreach ($sub in @('AppData\Roaming','AppData\Local','AppData\LocalLow')) {
+      $p = Join-Path $user $sub
+      if (Test-Path -LiteralPath $p) { $roots.Add($p) | Out-Null }
+    }
+  }
+
+  $presentByVendor = @{}
+  foreach ($root in $roots | Sort-Object -Unique) {
+    if (-not (Test-TimeBudget)) { break }
+    Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+      Select-Object -First 250 |
+      Where-Object { Test-PeripheralSoftwareName $_.Name } |
+      ForEach-Object {
+        $latest = Get-LatestWriteTimeUnderPath $_.FullName
+        $vendor = Get-PeripheralVendor $_.Name
+        if (-not $presentByVendor.ContainsKey($vendor)) {
+          $presentByVendor[$vendor] = [pscustomobject]@{
+            Vendor = $vendor
+            Latest = $latest
+            PrimaryPath = $_.FullName
+            Paths = New-Object System.Collections.Generic.List[string]
+          }
+        }
+        $presentByVendor[$vendor].Paths.Add($_.FullName) | Out-Null
+        if ($latest -and (-not $presentByVendor[$vendor].Latest -or $latest -gt $presentByVendor[$vendor].Latest)) {
+          $presentByVendor[$vendor].Latest = $latest
+          $presentByVendor[$vendor].PrimaryPath = $_.FullName
+        }
+      }
+  }
+
+  foreach ($vendor in $presentByVendor.Keys) {
+    $entry = $presentByVendor[$vendor]
+    if ($knownConfigsByVendor.ContainsKey($entry.Vendor)) { continue }
+    $details = "Found locations: $($entry.Paths.Count). Mouse/keyboard software can contain custom binds or macros. Check the app profile settings if this is unexpected."
+    Add-Finding -Severity 'MEDIUM' -Category 'Peripheral software present' -Evidence $entry.Vendor -Path $entry.PrimaryPath -ModifiedAt $entry.Latest -Details $details
+  }
+}
+
+function Search-MacroFiles {
+  $allowedExtensions = @('.ahk','.exe','.msi','.bat','.cmd','.ps1','.vbs','.ini','.cfg','.json','.txt','.lua','.js')
+
+  foreach ($root in Get-ScanRoots) {
+    if (-not (Test-TimeBudget)) { break }
+    Get-ChildItem -LiteralPath $root.Path -Recurse -Depth $root.Depth -Force -File -ErrorAction SilentlyContinue |
+      Where-Object { -not (Test-SkipScanPath $_.FullName) } |
+      Select-Object -First $script:MaxFilesPerRoot |
+      ForEach-Object {
+        if (-not (Test-TimeBudget)) { return }
+        if ($_.Length -gt 25MB) { return }
+        if ($script:ToolRoot -and $_.FullName.StartsWith($script:ToolRoot, [StringComparison]::OrdinalIgnoreCase)) { return }
+        if (Test-OwnToolFile $_.FullName) { return }
+        if ($_.Extension -and ($allowedExtensions -notcontains $_.Extension.ToLowerInvariant())) { return }
+        if (-not (Test-MacroName $_.Name)) { return }
+
+        $sev = if ($_.Extension -ieq '.ahk' -or $_.Name -match '(?i)autohotkey|tinytask|pulover|keyran|xmouse|macro|autoclick|clicker|rapidfire') { 'MEDIUM' } else { 'LOW' }
+        Add-Finding -Severity $sev -Category 'Macro-related file' -Evidence $_.Name -Path $_.FullName -CreatedAt $_.CreationTime -ModifiedAt $_.LastWriteTime -Details "Size: $([math]::Round($_.Length / 1KB, 1)) KB"
+      }
+    }
+}
+
+function Search-DeletedMacros {
+  $cutoff = (Get-Date).AddDays(-1)
+  $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -First 4
+
+  foreach ($drive in $drives) {
+    if (-not (Test-TimeBudget)) { break }
+    $bin = Join-Path $drive.Root '$Recycle.Bin'
+    if (-not (Test-Path -LiteralPath $bin)) { continue }
+
+    Get-ChildItem -LiteralPath $bin -Recurse -Force -File -Filter '$I*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -ge $cutoff } |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1500 |
+      ForEach-Object {
+      if (-not (Test-TimeBudget)) { return }
+      try {
+        $bytes = [IO.File]::ReadAllBytes($_.FullName)
+        if ($bytes.Length -lt 26) { return }
+
+        $deletedFileTime = [BitConverter]::ToInt64($bytes, 16)
+        if ($deletedFileTime -le 0) { return }
+        $deletedAt = [DateTime]::FromFileTimeUtc($deletedFileTime).ToLocalTime()
+        if ($deletedAt -lt $cutoff) { return }
+
+        $rawPath = [Text.Encoding]::Unicode.GetString($bytes, 24, $bytes.Length - 24)
+        $originalPath = $rawPath.Trim([char]0)
+        $name = [IO.Path]::GetFileName($originalPath)
+        if (Test-OwnToolFile $originalPath) { return }
+        $isMacro = (Test-MacroName $name) -or (Test-MacroName $originalPath)
+        $isPeripheral = (Test-PeripheralSoftwareName $name) -or (Test-PeripheralSoftwareName $originalPath)
+        if (-not $isMacro -and -not $isPeripheral) { return }
+
+        if ($isPeripheral -and -not $isMacro) {
+          $vendor = Get-PeripheralVendor $originalPath
+          Add-Finding -Severity 'MEDIUM' -Category 'Deleted peripheral software trace' -Evidence $vendor -Path $originalPath -DeletedAt $deletedAt -Details 'Deleted within the last 24 hours. Source: Windows Recycle Bin metadata.'
+        } else {
+          Add-Finding -Severity 'MEDIUM' -Category 'Deleted macro trace' -Evidence $name -Path $originalPath -DeletedAt $deletedAt -Details 'Deleted within the last 24 hours. Source: Windows Recycle Bin metadata. Permanently deleted files are only detectable if Windows still keeps a trace.'
+        }
+      } catch {
+        return
+      }
+    }
+  }
+}
+
+function Search-AhkScriptContent {
+  $ahkIndicators = @(
+    'SendInput','SendEvent','Click','MouseClick','Loop','SetTimer','Hotkey',
+    'GetKeyState','A_PriorHotkey','#IfWinActive','~LButton','~RButton',
+    'XButton1','XButton2','WheelUp','WheelDown'
+  )
+
+  foreach ($root in Get-ScanRoots) {
+    if (-not (Test-TimeBudget)) { break }
+    Get-ChildItem -LiteralPath $root.Path -Recurse -Depth $root.Depth -Force -File -Filter *.ahk -ErrorAction SilentlyContinue |
+      Where-Object { -not (Test-SkipScanPath $_.FullName) } |
+      Select-Object -First 300 |
+      Where-Object { $_.Length -le 2MB } |
+      ForEach-Object {
+        if (-not (Test-TimeBudget)) { return }
+        $content = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
+        if (-not $content) { return }
+        $hits = @()
+        foreach ($indicator in $ahkIndicators) {
+          if ($content -match [regex]::Escape($indicator)) { $hits += $indicator }
+        }
+        $severity = if ($hits.Count -ge 3) { 'HIGH' } else { 'MEDIUM' }
+        Add-Finding -Severity $severity -Category 'AutoHotkey script evidence' -Evidence $_.Name -Path $_.FullName -CreatedAt $_.CreationTime -ModifiedAt $_.LastWriteTime -Details ("Indicators: " + (($hits | Select-Object -Unique) -join ', '))
+      }
+  }
+}
+
+function Search-Prefetch {
+  $prefetch = Join-Path $env:SystemRoot 'Prefetch'
+  if (-not (Test-Path -LiteralPath $prefetch)) { return }
+
+  $patterns = @('*AUTOHOTKEY*.pf','*TINYTASK*.pf','*MACRO*.pf','*CLICKER*.pf','*PULOVER*.pf','*KEYRAN*.pf','*XMOUSE*.pf')
+  foreach ($pattern in $patterns) {
+    Get-ChildItem -LiteralPath $prefetch -Filter $pattern -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      Add-Finding -Severity 'MEDIUM' -Category 'Windows execution trace' -Evidence $_.Name -Path $_.FullName -UsedAt $_.LastWriteTime -ModifiedAt $_.LastWriteTime -Details 'Prefetch timestamp is a Windows execution trace. Run as administrator for best coverage.'
+    }
+  }
+}
+
+function Search-RecentJavaLogs {
+  foreach ($user in Get-UserDirs) {
+    $logRoot = Join-Path $user 'AppData\Roaming\.minecraft\logs'
+    if (-not (Test-Path -LiteralPath $logRoot)) { continue }
+
+    Get-ChildItem -LiteralPath $logRoot -Force -File -Filter '*.log' -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 5 |
+      ForEach-Object {
+        $content = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
+        if ($content -match '(?i)autohotkey|macro|clicker|tinytask|keyran|xmouse') {
+          Add-Finding -Severity 'MEDIUM' -Category 'Minecraft log keyword hit' -Evidence $_.Name -Path $_.FullName -ModifiedAt $_.LastWriteTime -Details 'Keyword found in recent Minecraft Java log.'
+        }
+      }
+  }
+}
+
+function Write-CleanSummary {
+  $high = @($script:Findings | Where-Object Severity -eq 'HIGH').Count
+  $medium = @($script:Findings | Where-Object Severity -eq 'MEDIUM').Count
+  $low = @($script:Findings | Where-Object Severity -eq 'LOW').Count
+  $deleted = @($script:Findings | Where-Object { $_.DeletedAt }).Count
+  $recentCutoff = (Get-Date).AddDays(-7)
+  $recent = @($script:Findings | Where-Object {
+    $_.Category -match 'macro|AutoHotkey|In-app|execution|Running macro' -and
+    @($_.DeletedAt, $_.UsedAt, $_.CreatedAt, $_.ModifiedAt | Where-Object { $_ -is [datetime] -and $_ -ge $recentCutoff }).Count -gt 0
+  }).Count
+  $peripheral = @($script:Findings | Where-Object { $_.Category -like '*Peripheral*' }).Count
+  $macroFiles = @($script:Findings | Where-Object { $_.Category -like '*macro*' -or $_.Category -like '*AutoHotkey*' -or $_.Category -like '*execution*' }).Count
+
+  $status = if ($high -gt 0) {
+    'Direct evidence found. Review HIGH results first.'
+  } elseif ($medium -gt 0) {
+    'Strong traces found. Review MEDIUM results and timestamps.'
+  } elseif ($low -gt 0) {
+    'Only weak context was found.'
+  } else {
+    'No strict macro evidence was found.'
+  }
+
+  Write-Host 'Clean summary' -ForegroundColor Cyan
+  Write-Host ("    Verdict              : {0}" -f $status)
+  Write-Host ("    Result levels        : HIGH={0}  MEDIUM={1}  LOW={2}" -f $high, $medium, $low)
+  Write-Host ("    Macro-related traces : {0}" -f $macroFiles)
+  Write-Host ("    Peripheral software  : {0}" -f $peripheral)
+  Write-Host ("    Deleted in 24 hours  : {0}" -f $deleted)
+  Write-Host ("    Recent macro activity: {0}" -f $recent)
+  Write-Host
+}
+
+function Write-RecentMacroActivity {
+  $cutoff = (Get-Date).AddDays(-7)
+  $recent = @(
+    $script:Findings |
+      Where-Object {
+        $_.Category -match 'macro|AutoHotkey|In-app|execution|Running macro' -and
+        @($_.DeletedAt, $_.UsedAt, $_.CreatedAt, $_.ModifiedAt | Where-Object { $_ -is [datetime] -and $_ -ge $cutoff }).Count -gt 0
+      } |
+      ForEach-Object {
+        $signalAt = @($_.DeletedAt, $_.UsedAt, $_.CreatedAt, $_.ModifiedAt) | Where-Object { $_ -is [datetime] } | Sort-Object -Descending | Select-Object -First 1
+        $_ | Add-Member -NotePropertyName RecentSignalAt -NotePropertyValue $signalAt -Force
+        $_
+      } |
+      Sort-Object @{ Expression = 'RecentSignalAt'; Descending = $true } |
+      Select-Object -First 8
+  )
+
+  Write-Host 'Recent macro activity' -ForegroundColor Cyan
+  if ($recent.Count -eq 0) {
+    Write-Host '    No macro evidence was created, used, modified, or deleted in the last 7 days.'
+    Write-Host
+    return
+  }
+
+  foreach ($item in $recent) {
+    Write-Host ("    {0} | {1} | {2}" -f (Format-Time $item.RecentSignalAt), $item.Severity, $item.Category)
+    Write-Host ("        Evidence: {0}" -f $item.Evidence)
+    if ($item.Path) { Write-Host ("        Path    : {0}" -f $item.Path) }
+  }
+  Write-Host
+}
+
+function Write-FindingTable {
+  $ordered = $script:Findings |
+    ForEach-Object {
+      $rank = Get-SeverityRank $_.Severity
+      $signalAt = @($_.DeletedAt, $_.UsedAt, $_.CreatedAt, $_.ModifiedAt) | Where-Object { $_ -is [datetime] } | Sort-Object -Descending | Select-Object -First 1
+      $_ | Add-Member -NotePropertyName Rank -NotePropertyValue $rank -Force
+      $_ | Add-Member -NotePropertyName SignalAt -NotePropertyValue $signalAt -Force
+      $_
+    } |
+    Sort-Object Rank, Category, @{ Expression = 'SignalAt'; Descending = $true }
+
+  if (-not $ordered -or $ordered.Count -eq 0) {
+    Write-Host 'No strict macro evidence was found.' -ForegroundColor Green
+    Write-Host 'This does not prove the PC never used macros; it means this scan found no direct evidence in the checked locations.' -ForegroundColor DarkGray
+    return
+  }
+
+  $i = 1
+  $lastSeverity = ''
+  foreach ($finding in $ordered) {
+    if (-not $lastSeverity) {
+      if ($finding.Severity -eq 'HIGH') {
+        Write-Host ('=' * 86) -ForegroundColor Green
+        Write-Host 'HIGH' -ForegroundColor Red
+        Write-Host ('=' * 86) -ForegroundColor Green
+      } elseif ($finding.Severity -eq 'MEDIUM') {
+        Write-Host ('=' * 86) -ForegroundColor Green
+        Write-Host 'MEDIUM' -ForegroundColor Yellow
+        Write-Host ('=' * 86) -ForegroundColor Green
+      } else {
+        Write-Host ('-' * 86) -ForegroundColor DarkGray
+        Write-Host 'LOW' -ForegroundColor Gray
+        Write-Host ('-' * 86) -ForegroundColor DarkGray
+      }
+    } elseif ($lastSeverity -eq 'HIGH' -and $finding.Severity -eq 'MEDIUM') {
+      Write-Host ('=' * 86) -ForegroundColor Green
+      Write-Host 'MEDIUM' -ForegroundColor Yellow
+      Write-Host ('=' * 86) -ForegroundColor Green
+    } elseif ($lastSeverity -eq 'MEDIUM' -and $finding.Severity -eq 'LOW') {
+      Write-Host ('-' * 86) -ForegroundColor DarkGray
+      Write-Host 'LOW' -ForegroundColor Gray
+      Write-Host ('-' * 86) -ForegroundColor DarkGray
+    }
+    $lastSeverity = $finding.Severity
+
+    $color = switch ($finding.Severity) {
+      'HIGH' { 'Red' }
+      'MEDIUM' { 'Yellow' }
+      default { 'Gray' }
+    }
+
+    Write-Host ("[{0}] {1} | {2}" -f $i, $finding.Severity, $finding.Category) -ForegroundColor $color
+    Write-Host ("    Evidence : {0}" -f $finding.Evidence)
+    Write-Host ("    Used at  : {0}" -f (Format-Time $finding.UsedAt))
+    Write-Host ("    Created  : {0}" -f (Format-Time $finding.CreatedAt))
+    Write-Host ("    Modified : {0}" -f (Format-Time $finding.ModifiedAt))
+    Write-Host ("    Deleted  : {0}" -f (Format-Time $finding.DeletedAt))
+    if ($finding.Path) { Write-Host ("    Path     : {0}" -f $finding.Path) }
+    if ($finding.Details) { Write-Host ("    Details  : {0}" -f $finding.Details) }
+    Write-Host
+    $i++
+  }
+}
 
 # ==================== START SCRIPT ====================
 Write-Header
